@@ -39,7 +39,7 @@ func main() {
 		if s, err := strconv.Atoi(strings.Split(pieces[len(pieces)-1], ".")[0]); err == nil {
 			pkgPiece = s
 		} else {
-			fmt.Printf("not a valid piece %v\n", err)
+			fmt.Printf("not a valid piece %s\n", err.Error())
 			continue
 		}
 		pkg := &Package{part: pkgPiece, file: file, parts: []*Package{}}
