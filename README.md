@@ -15,8 +15,10 @@ Run 'go run main.go' to execute, or run 'go build' to generate a binary to execu
 
 
 ## Using
-Create a folder in your the exe directory called 'pkgs'
+Create a folder and put all your pkgs inside this folder
 
-Put all of your pkg files inside this folder
+Run the program using the following command:
 
-Run the program; It'll merge all the parts into the main root package file (the one with _0 at the end of the name)
+`pkg-merge.exe -dir "myDir"` (replace myDir with your folder name)
+
+The program will merge all the pkg parts into the root pkg file (the one with _0 at the end of the name)
