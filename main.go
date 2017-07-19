@@ -137,7 +137,7 @@ func merge(pkg *Package) error {
 		partBuffer := bufio.NewReader(partFile)
 
 		if _, err := io.Copy(rootBuffer, partBuffer); err != nil {
-			panic(err)
+			return fmt.Errorf("failed copying package part %d: %s", part.part, err.Error())
 		}
 	}
 	return nil
