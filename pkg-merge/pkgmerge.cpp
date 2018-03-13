@@ -49,10 +49,10 @@ void merge(map<string, Package> packages) {
 
 		printf("\t[work] copying root package file to new file...");
 		auto merged_file = fs::path(full_merged_file);
-		printf("done\n");
 
 		// Deal with root file first
 		fs::copy_file(pkg.file, merged_file, fs::copy_options::update_existing);
+		printf("done\n");
 
 		// Using C API from here on because it just works and is fast
 		FILE *merged = fopen(full_merged_file.c_str(), "a+");
