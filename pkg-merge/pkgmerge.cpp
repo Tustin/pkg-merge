@@ -47,9 +47,9 @@ void merge(map<string, Package> packages) {
 			fs::remove(full_merged_file);
 		}
 
-		printf("\t[work] copying root package file to new file...\n");
+		printf("\t[work] copying root package file to new file...");
 		auto merged_file = fs::path(full_merged_file);
-
+		printf("done\n");
 
 		// Deal with root file first
 		fs::copy_file(pkg.file, merged_file, fs::copy_options::update_existing);
@@ -71,12 +71,12 @@ void merge(map<string, Package> packages) {
 			{
 				fwrite(b, 1, n, merged);
 				copied += n;
-				auto percentage = copied / total_size * 100;
-				std::cout << "\t\rmerged " << copied << "/" << total_size << " bytes (" << percentage << "%) for part " << part.part;
+				auto percentage = ((double)copied / (double)total_size) * 100;
+				printf("\r\t[work] merged %llu/%llu bytes (%.0lf%%) for part %d...", copied, total_size, percentage, part.part);
 			}
 			fclose(to_merge);
 
-			printf("\n\t[work] merged piece %d for package %s\n", part.part, title_id);
+			printf("done\n");
 		}
 		fclose(merged);
 	}
@@ -84,8 +84,17 @@ void merge(map<string, Package> packages) {
 
 int main(int argc, char *argv[])
 {
+	if (argc != 2) {
+		std::cout << "No pkg directory supplied\nUsage: pkg-merge.exe <directory>" << std::endl;
+		return 1;
+	}
+	string dir = argv[1];
+	if (!fs::is_directory(dir)) {
+		printf("[error] argument '%s' is not a directory\n", dir.c_str());
+		return 1;
+	}
 	map<string, Package> packages;
-	for (auto & file : fs::directory_iterator("E:\\Code\\Go\\src\\github.com\\Tustin\\pkg-merge\\Debug\\pkgs")) {
+	for (auto & file : fs::directory_iterator(dir)) {
 		string file_name = file.path().filename().string();
 
 		if (file.path().extension() != ".pkg") {
@@ -138,7 +147,7 @@ int main(int argc, char *argv[])
 
 	}
 	merge(packages);
-	printf("[success] completed\n");
+	printf("\n[success] completed\n");
 	return 0;
 }
 
