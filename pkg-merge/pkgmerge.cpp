@@ -55,22 +55,22 @@ void merge(map<string, Package> packages) {
 		printf("done\n");
 
 		// Using C API from here on because it just works and is fast
-		FILE *merged = fopen(full_merged_file.c_str(), "a+");
+		FILE *merged = fopen(full_merged_file.c_str(), "a+b");
 
 		// Now all the pieces...
 		for (auto & part : pkg.parts) {
-			FILE *to_merge = fopen(part.file.string().c_str(), "rb");
+			FILE *to_merge = fopen(part.file.string().c_str(), "r+b");
 
 			auto total_size = fs::file_size(part.file);
 			assert(total_size != 0);
-			char b[1024 * 512];
+			char buffer[1024 * 512];
 			uintmax_t copied = 0;
 
-			int n;
-			while ((n = fread(b, 1, sizeof(b), to_merge)) > 0)
+			size_t read_data;
+			while ((read_data = fread(buffer, sizeof(char), sizeof(buffer), to_merge)) > 0)
 			{
-				fwrite(b, 1, n, merged);
-				copied += n;
+				fwrite(buffer, sizeof(char), read_data, merged);
+				copied += read_data * sizeof(char);
 				auto percentage = ((double)copied / (double)total_size) * 100;
 				printf("\r\t[work] merged %llu/%llu bytes (%.0lf%%) for part %d...", copied, total_size, percentage, part.part);
 			}
@@ -84,11 +84,17 @@ void merge(map<string, Package> packages) {
 
 int main(int argc, char *argv[])
 {
+#ifndef _DEBUG
 	if (argc != 2) {
 		std::cout << "No pkg directory supplied\nUsage: pkg-merge.exe <directory>" << std::endl;
 		return 1;
-	}
+}
 	string dir = argv[1];
+#else
+	string dir = "E:\\Code\\Go\\src\\github.com\\Tustin\\pkg-merge\\Debug\\pkgs";
+#endif // !_DEBUG
+
+
 	if (!fs::is_directory(dir)) {
 		printf("[error] argument '%s' is not a directory\n", dir.c_str());
 		return 1;
