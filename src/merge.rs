@@ -1,4 +1,4 @@
-use crate::cli::{FinalDigest, VerifyMode};
+use crate::cli::VerifyMode;
 use crate::error::{Error, Result, EXIT_IO, EXIT_PIECES};
 use crate::http;
 use crate::journal::{self, Journal};
@@ -121,24 +121,17 @@ pub struct MergeRequest<'a> {
     pub verify: VerifyMode,
     pub buffer_bytes: usize,
     pub force: bool,
-    pub allow_digest_mismatch: bool,
-    pub final_digest: FinalDigest,
+    pub strict_package_digest: bool,
+    pub verify_final: bool,
     pub stop_after: Option<usize>,
     pub no_progress: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DigestStatus {
-    Verified,
-    Skipped,
-    MismatchAccepted,
 }
 
 pub struct MergeSummary {
     pub output: PathBuf,
     pub bytes: u64,
     pub deleted_parts: usize,
-    pub digest: DigestStatus,
+    pub full_hash: Option<String>,
     pub elapsed: std::time::Duration,
 }
 
@@ -282,9 +275,6 @@ pub fn run(request: &MergeRequest<'_>, log: &Log) -> Result<MergeSummary> {
         )));
     }
 
-    let mut global_valid = request.verify != VerifyMode::None && !(has_journal && start_index > 0);
-    let mut global_hasher = Sha256::new();
-
     // Preparación fresca del modo in-place.
     if journal.is_none() && request.in_place {
         let mut ready = false;
@@ -297,12 +287,7 @@ pub fn run(request: &MergeRequest<'_>, log: &Log) -> Result<MergeSummary> {
                         0,
                         "verificando pieza 1",
                     );
-                    let hash = match hash_file_into(
-                        path,
-                        &mut buffer,
-                        Some(&mut global_hasher),
-                        Some(&bar),
-                    ) {
+                    let hash = match hash_file_into(path, &mut buffer, Some(&bar)) {
                         Ok(hash) => hash,
                         Err(error) => {
                             bar.abandon();
@@ -347,7 +332,6 @@ pub fn run(request: &MergeRequest<'_>, log: &Log) -> Result<MergeSummary> {
                     bytes_written,
                 ));
                 journal::save(&journal_path, journal.as_ref().unwrap())?;
-                global_valid = request.verify != VerifyMode::None;
                 log.info(format!(
                     "[ok] pieza 1/{} {} (reutilizada como base)",
                     total_pieces,
@@ -393,7 +377,6 @@ pub fn run(request: &MergeRequest<'_>, log: &Log) -> Result<MergeSummary> {
                 bytes_written,
             ));
             journal::save(&journal_path, journal.as_ref().unwrap())?;
-            global_valid = false;
             log.info(format!(
                 "[ok] pieza 1/{} {} (recuperada del .part)",
                 total_pieces,
@@ -419,8 +402,7 @@ pub fn run(request: &MergeRequest<'_>, log: &Log) -> Result<MergeSummary> {
 
     let resumed_run = has_journal && start_index > 0;
 
-    // Al reanudar, verificamos la última pieza completada. Si solo hay una,
-    // aprovechamos para reconstruir el estado del SHA-256 global.
+    // Al reanudar, verificamos la última pieza completada antes de continuar.
     if resumed_run {
         let last = &request.pieces[start_index - 1];
         let bar = progress::make_bar(
@@ -429,21 +411,13 @@ pub fn run(request: &MergeRequest<'_>, log: &Log) -> Result<MergeSummary> {
             0,
             format!("verificando pieza {} (reanudación)", start_index),
         );
-        let hash = {
-            let global_target = if start_index == 1 && request.verify != VerifyMode::None {
-                Some(&mut global_hasher)
-            } else {
-                None
-            };
-            hash_range_into(
-                &part,
-                last.piece.file_offset,
-                last.piece.file_size,
-                &mut buffer,
-                global_target,
-                Some(&bar),
-            )
-        };
+        let hash = hash_range_into(
+            &part,
+            last.piece.file_offset,
+            last.piece.file_size,
+            &mut buffer,
+            Some(&bar),
+        );
         let hash = match hash {
             Ok(hash) => hash,
             Err(error) => {
@@ -464,9 +438,6 @@ pub fn run(request: &MergeRequest<'_>, log: &Log) -> Result<MergeSummary> {
                     start_index
                 ),
             ));
-        }
-        if start_index == 1 && request.verify != VerifyMode::None {
-            global_valid = true;
         }
         if request.delete_parts {
             for completed in request.pieces.iter().take(start_index).skip(1) {
@@ -624,7 +595,7 @@ pub fn run(request: &MergeRequest<'_>, log: &Log) -> Result<MergeSummary> {
                         0,
                         format!("verificando pieza {}", index + 1),
                     );
-                    let hash = match hash_file_into(path, &mut buffer, None, Some(&pre)) {
+                    let hash = match hash_file_into(path, &mut buffer, Some(&pre)) {
                         Ok(hash) => hash,
                         Err(error) => {
                             pre.abandon();
@@ -666,11 +637,6 @@ pub fn run(request: &MergeRequest<'_>, log: &Log) -> Result<MergeSummary> {
                     } else {
                         None
                     },
-                    if global_valid {
-                        Some(&mut global_hasher)
-                    } else {
-                        None
-                    },
                     &bar,
                 )
             }
@@ -700,11 +666,6 @@ pub fn run(request: &MergeRequest<'_>, log: &Log) -> Result<MergeSummary> {
                     located.piece.file_size,
                     if verify_piece_after {
                         Some(&mut piece_hasher)
-                    } else {
-                        None
-                    },
-                    if global_valid {
-                        Some(&mut global_hasher)
                     } else {
                         None
                     },
@@ -822,77 +783,47 @@ pub fn run(request: &MergeRequest<'_>, log: &Log) -> Result<MergeSummary> {
     }
     drop(part_file);
 
-    let mut digest_status = DigestStatus::Skipped;
-    if let Some(expected) = request.manifest.package_digest.as_deref() {
-        let streamed = request.final_digest == FinalDigest::Auto && global_valid;
-        // Si el merge ya había terminado y no tenemos el estado del hash, releemos
-        // el archivo: es la única forma de no dar por bueno un digest que falló.
-        let rehash = request.final_digest == FinalDigest::Rehash
-            || (request.final_digest == FinalDigest::Auto
-                && !global_valid
-                && start_index == total_pieces);
+    verify_final_size(&part, request.manifest.original_file_size, log)?;
 
-        if request.final_digest == FinalDigest::Skip {
-            log.warn("Verificación del SHA-256 global omitida (--final-digest skip).");
-        } else if streamed {
-            let actual = hex::encode(global_hasher.finalize());
-            if verify::hex_eq(&actual, expected) {
-                digest_status = DigestStatus::Verified;
-                log.info(format!("SHA-256 global verificado: {actual}"));
-            } else if request.allow_digest_mismatch {
-                digest_status = DigestStatus::MismatchAccepted;
-                log.warn(format!(
-                    "SHA-256 global distinto.\n  esperado: {expected}\n  obtenido: {actual}\nSe continúa por --allow-digest-mismatch."
-                ));
-            } else {
+    let expected_digest = request.manifest.package_digest.as_deref();
+    let full_hash = if request.verify_final || request.strict_package_digest {
+        Some(verify_final_file(
+            &part,
+            request.pieces,
+            &mut buffer,
+            request.no_progress,
+            log,
+        )?)
+    } else {
+        None
+    };
+
+    if let Some(actual) = &full_hash {
+        if let Some(expected) = expected_digest {
+            if verify::hex_eq(actual, expected) {
+                log.info("El packageDigest de Sony coincide con el SHA-256 del archivo unido.");
+            } else if request.strict_package_digest {
                 bar.abandon();
                 return Err(Error::digest(format!(
-                    "el SHA-256 global no coincide.\n  esperado: {expected}\n  obtenido: {actual}\nEl .part se conserva en '{}' para inspección. Usa --allow-digest-mismatch solo si estás seguro.",
+                    "el packageDigest de Sony no coincide con el SHA-256 del archivo unido.\n  esperado: {expected}\n  obtenido: {actual}\nSe pidió --strict-package-digest; el .part se conserva en '{}'.",
                     part.display()
                 )));
-            }
-        } else if rehash {
-            let rehash_bar = progress::make_bar(
-                request.manifest.original_file_size,
-                !request.no_progress,
-                0,
-                "SHA-256 global",
-            );
-            let actual = match hash_file_into(&part, &mut buffer, None, Some(&rehash_bar)) {
-                Ok(hash) => hash,
-                Err(error) => {
-                    rehash_bar.abandon();
-                    bar.abandon();
-                    return Err(Error::io_path(
-                        "no se pudo recalcular el SHA-256 global",
-                        &part,
-                        error,
-                    ));
-                }
-            };
-            rehash_bar.finish_and_clear();
-            if verify::hex_eq(&actual, expected) {
-                digest_status = DigestStatus::Verified;
-                log.info(format!("SHA-256 global verificado (rehash): {actual}"));
-            } else if request.allow_digest_mismatch {
-                digest_status = DigestStatus::MismatchAccepted;
-                log.warn(format!(
-                    "SHA-256 global distinto (rehash).\n  esperado: {expected}\n  obtenido: {actual}\nSe continúa por --allow-digest-mismatch."
-                ));
             } else {
-                bar.abandon();
-                return Err(Error::digest(format!(
-                    "el SHA-256 global no coincide (rehash).\n  esperado: {expected}\n  obtenido: {actual}\nEl .part se conserva en '{}'.",
-                    part.display()
-                )));
+                log.warn(format!(
+                    "El packageDigest de Sony no coincide con el SHA-256 del archivo unido.\n  esperado: {expected}\n  obtenido: {actual}\nEsto es normal en PKG divididos de PS5 (FIH + _sc): las piezas y el tamaño total sí están verificados. Usa --strict-package-digest para convertirlo en error."
+                ));
             }
+        } else if request.strict_package_digest {
+            log.warn("El manifiesto no trae packageDigest; no hay nada que comparar.");
         } else {
-            log.warn(
-                "Merge reanudado: no puedo continuar el SHA-256 global. Usa --final-digest rehash para verificarlo (leerá el archivo completo otra vez).",
+            log.info(
+                "El manifiesto no trae packageDigest; se verificó el archivo final pieza a pieza.",
             );
         }
-    } else {
-        log.warn("El manifiesto no trae packageDigest; no se puede verificar el hash global.");
+    } else if expected_digest.is_some() {
+        log.detail(
+            "packageDigest no comprobado; usa --verify-final para releer y verificar el archivo, o --strict-package-digest para compararlo.",
+        );
     }
 
     if final_path.exists() {
@@ -922,9 +853,90 @@ pub fn run(request: &MergeRequest<'_>, log: &Log) -> Result<MergeSummary> {
         output: final_path,
         bytes: request.manifest.original_file_size,
         deleted_parts,
-        digest: digest_status,
+        full_hash,
         elapsed: started.elapsed(),
     })
+}
+
+fn verify_final_size(part: &Path, expected: u64, log: &Log) -> Result<()> {
+    let actual = fs::metadata(part)
+        .map_err(|e| Error::io_path("no se pudo leer el tamaño del archivo final", part, e))?
+        .len();
+    if actual != expected {
+        return Err(Error::pieces(format!(
+            "el tamaño del archivo final no coincide.\n  esperado: {expected} bytes\n  obtenido: {actual} bytes\nEl .part se conserva en '{}'.",
+            part.display()
+        )));
+    }
+    log.info(format!(
+        "Tamaño total verificado: {} ({} bytes).",
+        util::format_bytes(actual),
+        actual
+    ));
+    Ok(())
+}
+
+fn verify_final_file(
+    part: &Path,
+    pieces: &[LocatedPiece],
+    buffer: &mut [u8],
+    no_progress: bool,
+    log: &Log,
+) -> Result<String> {
+    let total: u64 = pieces.iter().map(|located| located.piece.file_size).sum();
+    let bar = progress::make_bar(total, !no_progress, 0, "verificando archivo final");
+    let mut file = File::open(part)
+        .map_err(|e| Error::io_path("no se pudo abrir el archivo final", part, e))?;
+    let mut global = Sha256::new();
+
+    for (index, located) in pieces.iter().enumerate() {
+        file.seek(SeekFrom::Start(located.piece.file_offset))
+            .map_err(|e| Error::io_path("no se pudo posicionar el archivo final", part, e))?;
+        let mut hasher = Sha256::new();
+        let mut remaining = located.piece.file_size;
+        while remaining > 0 {
+            let want = if remaining < buffer.len() as u64 {
+                remaining as usize
+            } else {
+                buffer.len()
+            };
+            let read = file
+                .read(&mut buffer[..want])
+                .map_err(|e| Error::io_path("error leyendo el archivo final", part, e))?;
+            if read == 0 {
+                bar.abandon();
+                return Err(Error::pieces(format!(
+                    "el archivo final termina antes de la pieza {}/{}",
+                    index + 1,
+                    pieces.len()
+                )));
+            }
+            hasher.update(&buffer[..read]);
+            global.update(&buffer[..read]);
+            bar.inc(read as u64);
+            remaining -= read as u64;
+        }
+        let actual = hex::encode(hasher.finalize());
+        if !verify::hex_eq(&actual, &located.piece.hash_value) {
+            bar.abandon();
+            return Err(Error::pieces(format!(
+                "la verificación final de la pieza {}/{} falló.\n  esperado: {}\n  obtenido: {}",
+                index + 1,
+                pieces.len(),
+                located.piece.hash_value,
+                actual
+            )));
+        }
+    }
+
+    bar.finish_and_clear();
+    let actual = hex::encode(global.finalize());
+    log.info(format!(
+        "Verificación final correcta: {} pieza(s), {} releídos.",
+        pieces.len(),
+        util::format_bytes(total)
+    ));
+    Ok(actual)
 }
 
 fn validate_journal(journal: &Journal, request: &MergeRequest<'_>) -> Result<()> {
@@ -1022,12 +1034,7 @@ fn check_space(directory: &Path, needed: u64, log: &Log) -> Result<()> {
     Ok(())
 }
 
-fn hash_file_into(
-    path: &Path,
-    buffer: &mut [u8],
-    mut global: Option<&mut Sha256>,
-    bar: Option<&ProgressBar>,
-) -> io::Result<String> {
+fn hash_file_into(path: &Path, buffer: &mut [u8], bar: Option<&ProgressBar>) -> io::Result<String> {
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
     loop {
@@ -1036,9 +1043,6 @@ fn hash_file_into(
             break;
         }
         hasher.update(&buffer[..read]);
-        if let Some(target) = global.as_deref_mut() {
-            target.update(&buffer[..read]);
-        }
         if let Some(bar) = bar {
             bar.inc(read as u64);
         }
@@ -1051,7 +1055,6 @@ fn hash_range_into(
     offset: u64,
     length: u64,
     buffer: &mut [u8],
-    mut global: Option<&mut Sha256>,
     bar: Option<&ProgressBar>,
 ) -> io::Result<String> {
     let mut file = File::open(path)?;
@@ -1072,9 +1075,6 @@ fn hash_range_into(
             ));
         }
         hasher.update(&buffer[..read]);
-        if let Some(target) = global.as_deref_mut() {
-            target.update(&buffer[..read]);
-        }
         if let Some(bar) = bar {
             bar.inc(read as u64);
         }
@@ -1089,7 +1089,6 @@ fn copy_chunks<R: Read + ?Sized>(
     buffer: &mut [u8],
     mut remaining: u64,
     mut piece_hasher: Option<&mut Sha256>,
-    mut global_hasher: Option<&mut Sha256>,
     bar: &ProgressBar,
 ) -> io::Result<()> {
     while remaining > 0 {
@@ -1109,9 +1108,6 @@ fn copy_chunks<R: Read + ?Sized>(
             ));
         }
         if let Some(hasher) = piece_hasher.as_deref_mut() {
-            hasher.update(&buffer[..read]);
-        }
-        if let Some(hasher) = global_hasher.as_deref_mut() {
             hasher.update(&buffer[..read]);
         }
         destination.write_all(&buffer[..read])?;
@@ -1152,7 +1148,7 @@ pub fn check(pieces: &[LocatedPiece], jobs: usize, no_progress: bool, log: &Log)
                 match &located.source {
                     PieceSource::Local(path) => {
                         let name = path.display().to_string();
-                        match hash_file_into(path, &mut buffer, None, Some(&bar)) {
+                        match hash_file_into(path, &mut buffer, Some(&bar)) {
                             Ok(actual) => {
                                 let ok = verify::hex_eq(&actual, &located.piece.hash_value);
                                 (located.index, name, ok, actual)

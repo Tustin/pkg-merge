@@ -14,7 +14,7 @@ use crate::cli::Cli;
 use crate::error::{Error, Result, EXIT_USAGE};
 use crate::locate::{LocatedPiece, PieceSource};
 use crate::log::Log;
-use crate::merge::{DigestStatus, MergeRequest};
+use crate::merge::MergeRequest;
 use clap::Parser;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -174,8 +174,8 @@ fn run(cli: Cli) -> Result<()> {
             verify: cli.verify,
             buffer_bytes: (cli.buffer as usize).saturating_mul(1024 * 1024),
             force: cli.force,
-            allow_digest_mismatch: cli.allow_digest_mismatch,
-            final_digest: cli.final_digest,
+            strict_package_digest: cli.strict_package_digest,
+            verify_final: cli.verify_final || cli.strict_package_digest,
             stop_after: cli.stop_after,
             no_progress: cli.no_progress,
         },
@@ -192,12 +192,8 @@ fn run(cli: Cli) -> Result<()> {
     if summary.deleted_parts > 0 {
         log.info(format!("Piezas borradas: {}", summary.deleted_parts));
     }
-    match summary.digest {
-        DigestStatus::Verified => log.info("SHA-256 global verificado."),
-        DigestStatus::Skipped => log.warn("SHA-256 global no verificado."),
-        DigestStatus::MismatchAccepted => {
-            log.warn("SHA-256 global distinto (aceptado con --allow-digest-mismatch).")
-        }
+    if let Some(hash) = &summary.full_hash {
+        log.info(format!("SHA-256 del archivo unido: {hash}"));
     }
     Ok(())
 }

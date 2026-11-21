@@ -290,7 +290,7 @@ fn resumes_after_stop() {
 }
 
 #[test]
-fn resume_with_rehash_verifies_global_digest() {
+fn resume_with_verify_final_verifies_file() {
     let fx = fixture(&[1024 * 1024, 1024 * 1024, 1024 * 1024]);
     merge_cmd(&fx)
         .arg("--stop-after")
@@ -298,12 +298,27 @@ fn resume_with_rehash_verifies_global_digest() {
         .assert()
         .code(130);
 
-    merge_cmd(&fx)
-        .arg("--final-digest")
-        .arg("rehash")
-        .assert()
-        .success();
+    merge_cmd(&fx).arg("--verify-final").assert().success();
     assert_eq!(fs::read(output_path(&fx)).unwrap(), expected_data(&fx));
+}
+
+#[test]
+fn resume_detects_truncated_part() {
+    let fx = fixture(&[1024 * 1024, 1024 * 1024, 1024 * 1024]);
+    merge_cmd(&fx)
+        .arg("--stop-after")
+        .arg("1")
+        .assert()
+        .code(130);
+
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(part_path(&fx))
+        .unwrap();
+    file.set_len(1).unwrap();
+    drop(file);
+
+    merge_cmd(&fx).assert().code(5);
 }
 
 #[test]
@@ -351,32 +366,64 @@ fn rejects_manifest_with_gap() {
 }
 
 #[test]
-fn digest_mismatch_keeps_part_and_fails() {
+fn package_digest_is_not_compared_by_default() {
+    let fx = fixture(&[1024 * 1024, 1024 * 1024]);
+    let mut manifest = read_manifest(&fx);
+    manifest["packageDigest"] = json!("00".repeat(32));
+    write_manifest(&fx, &manifest);
+
+    merge_cmd(&fx).assert().success();
+
+    assert!(output_path(&fx).exists());
+    assert!(!part_path(&fx).exists());
+}
+
+#[test]
+fn verify_final_warns_on_package_digest_mismatch() {
     let fx = fixture(&[1024 * 1024, 1024 * 1024]);
     let mut manifest = read_manifest(&fx);
     manifest["packageDigest"] = json!("00".repeat(32));
     write_manifest(&fx, &manifest);
 
     merge_cmd(&fx)
+        .arg("--verify-final")
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("no coincide"));
+
+    assert!(output_path(&fx).exists());
+}
+
+#[test]
+fn strict_package_digest_fails() {
+    let fx = fixture(&[1024 * 1024, 1024 * 1024]);
+    let mut manifest = read_manifest(&fx);
+    manifest["packageDigest"] = json!("00".repeat(32));
+    write_manifest(&fx, &manifest);
+
+    merge_cmd(&fx)
+        .arg("--strict-package-digest")
         .assert()
         .code(4)
-        .stderr(predicates::str::contains("SHA-256 global"));
+        .stderr(predicates::str::contains("packageDigest"));
 
     assert!(!output_path(&fx).exists());
     assert!(part_path(&fx).exists());
 }
 
 #[test]
-fn allow_digest_mismatch_creates_output() {
+fn verify_final_without_package_digest_still_verifies_pieces() {
     let fx = fixture(&[1024 * 1024, 1024 * 1024]);
     let mut manifest = read_manifest(&fx);
-    manifest["packageDigest"] = json!("00".repeat(32));
+    manifest.as_object_mut().unwrap().remove("packageDigest");
     write_manifest(&fx, &manifest);
 
     merge_cmd(&fx)
-        .arg("--allow-digest-mismatch")
+        .arg("--verify-final")
         .assert()
-        .success();
+        .success()
+        .stderr(predicates::str::contains("no trae packageDigest"));
+
     assert!(output_path(&fx).exists());
 }
 

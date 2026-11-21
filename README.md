@@ -4,8 +4,8 @@
 
 Une las piezas de un **PKG de PS4 o PS5** en un único archivo, usando el **manifiesto oficial `.json`** de Sony. Funciona con juegos base, parches y DLC, y no depende de que las piezas se llamen `_0.pkg`, `_1.pkg` o `_sc.pkg`: cada pieza se coloca en su `fileOffset` exacto.
 
-- Verifica el **SHA-256 de cada pieza** antes de dar el merge por bueno.
-- Verifica el **`packageDigest` global** del manifiesto.
+- Verifica el **SHA-256 de cada pieza** y el **tamaño total** antes de dar el merge por bueno.
+- Opcionalmente, `--verify-final` relee el archivo y comprueba cada bloque; `--strict-package-digest` compara además el `packageDigest` de Sony.
 - Permite escribir la salida en **otro disco** (`--output`), sin duplicar los 100+ GB.
 - Modo **in-place** para no necesitar el doble de espacio.
 - **Reanudable** tras un corte, apagón o Ctrl+C.
@@ -130,11 +130,11 @@ Las piezas ausentes se descargan directamente al offset del archivo final, sin o
 | `--in-place` | Usa la pieza 0 como archivo final, sin duplicar el PKG completo. |
 | `--delete-parts` | Borra cada pieza después de escribirla, sincronizarla y verificar su SHA-256. Requiere `--in-place`. |
 | `--verify <post\|pre\|none>` | `post` (por defecto): copia y hashea en la misma pasada. `pre`: hashea antes de copiar (dos lecturas). `none`: sin hashes. |
+| `--verify-final` | Relee el archivo final y verifica el SHA-256 de cada pieza en su offset. Más lento, máxima confianza. |
+| `--strict-package-digest` | Compara el `packageDigest` de Sony con el SHA-256 del archivo unido y falla si difiere. Implica `--verify-final`. |
 | `--check` | Solo verifica manifiesto y piezas; no escribe nada. |
 | `--buffer <MB>` | Búfer de E/S en MiB. Por defecto 64; máximo 1024. |
 | `--jobs <N>` | Hilos para `--check`. Por defecto 4. |
-| `--final-digest <auto\|rehash\|skip>` | Cómo verificar el `packageDigest` global. Por defecto `auto`. |
-| `--allow-digest-mismatch` | Si el hash global no coincide, avisa pero deja el archivo final. |
 | `--download-missing` | Descarga las piezas que no estén en disco. |
 | `--force` | Sobrescribe la salida y reinicia un merge anterior. |
 | `--yes` | No pide confirmación para `--delete-parts`. |
@@ -163,27 +163,52 @@ Las piezas ausentes se descargan directamente al offset del archivo final, sin o
    - Si el usuario renombró las piezas, por tamaño único.
    - Si hay ambigüedad, por SHA-256. Esto resuelve casos como una pieza `JP0082-...` y la última `EP0082-..._sc.pkg`.
 4. **Escribe cada pieza en su `fileOffset` exacto**, no por orden de nombre.
-5. **Verifica** el SHA-256 de cada pieza y el `packageDigest` global.
-6. Solo entonces renombra `<salida>.pkg.part` al nombre final.
+5. **Verifica el SHA-256 de cada pieza** mientras la copia (o antes, con `--verify pre`).
+6. **Verifica el tamaño total** contra `originalFileSize`. Si no coincide, no hay archivo final.
+7. **Opcionalmente** (`--verify-final`) relee el archivo final y vuelve a verificar cada pieza en su offset, y calcula su SHA-256 completo.
+8. Solo entonces renombra `<salida>.pkg.part` al nombre final.
+
+### Sobre `packageDigest` (importante)
+
+En los PKG divididos de PS5, el `packageDigest` de Sony **no es** el SHA-256 del archivo resultante de concatenar las piezas. Lo comprobamos con dos paquetes reales:
+
+- Las piezas principales empiezan por `FIH` (un contenedor de PlayGo), no por la cabecera PKG.
+- La pieza `_sc.pkg` va al final y lleva la cabecera PKG/SC.
+- El SHA-256 del archivo unido es distinto del `packageDigest`, y no coincide con ninguna combinación simple de las piezas.
+
+Por eso la verificación fiable es:
+
+- SHA-256 de cada pieza (autoritativo).
+- Tamaño total del archivo.
+- `--verify-final` para releer y comprobar todos los bloques.
+- `--strict-package-digest` solo si quieres comparar el `packageDigest` de Sony; si difiere, falla con código 4. Para los PKG divididos normales, es esperable que difiera.
 
 ### Datos reales comprobados
 
-En un manifiesto real de PS5 (`PPSA08668`) con 36 piezas:
+**PKG de PS5 de 1,4 GB (`UP0036-PPSA33152_00-QLIPHAH000010000`, 2 piezas):**
 
-- `originalFileSize`: `146832031744`
-- `numberOfSplitFiles`: `36`
-- `pieces`: offsets contiguos y suma exacta.
-- Los nombres de las piezas pueden pertenecer a otro título/región; los `fileOffset` son la fuente de verdad.
-- Descargamos una pieza real (`_sc.pkg`, 153 MB) y su `hashValue` coincidió **exactamente** con su SHA-256. Por eso la verificación por pieza es fiable.
+- Pieza 1: `1.386.283.008` bytes, SHA-256 `23d12946...` → coincide.
+- Pieza 2 (`_sc.pkg`): `100.204.544` bytes, SHA-256 `a21d4dc4...` → coincide.
+- Archivo unido: `1.486.487.552` bytes, SHA-256 `81338836...`.
+- `packageDigest` del manifiesto: `047E9DBD...` (distinto, y es normal).
+- La pieza 1 empieza por `FIH`; la `_sc.pkg` empieza por `7F 43 4E 54` (PKG) y va al final según el `fileOffset`.
+
+**PKG de PS5 de 146 GB (`PPSA08668`, 36 piezas):**
+
+- `originalFileSize`: `146832031744`.
+- `numberOfSplitFiles`: `36`.
+- Offsets contiguos y suma exacta.
+- La primera pieza también empieza por `FIH`.
+- Descargamos la `_sc.pkg` real (153 MB) y su `hashValue` coincidió **exactamente** con su SHA-256.
 - `playgoChunkCrcHashValue` es el SHA-256 del archivo `.crc`; el manifiesto está en el `.json`. El programa obtiene el `.json` cambiando únicamente la extensión.
 
-> `packageDigest` se asume calculado sobre la concatenación completa en orden de offset. Las piezas se verifican individualmente, así que el contenido es correcto aunque algún manifiesto use otra convención para el digest global. Si eso ocurre, el programa lo dirá y podrás usar `--final-digest rehash` o `--allow-digest-mismatch`.
+**Conclusión:** el `packageDigest` no se usa para decidir si el merge es válido. Se verifica cada bloque y el tamaño. `--verify-final` añade una relectura completa. `--strict-package-digest` queda como opción avanzada.
 
 ---
 
 ## Verificación SHA-256
 
-### Por pieza
+### Por pieza (siempre)
 
 Cada `hashValue` del manifiesto se compara con el SHA-256 real del archivo. Si una pieza está corrupta:
 
@@ -192,11 +217,17 @@ Cada `hashValue` del manifiesto se compara con el SHA-256 real del archivo. Si u
 - Se muestran el hash esperado y el obtenido.
 - El archivo final **no** se genera.
 
-### Global (`packageDigest`)
+### Tamaño total (siempre)
 
-- `auto` (por defecto): se calcula durante la misma pasada de copia, sin lectura extra.
-- `rehash`: relee el archivo final completo y lo verifica (útil al reanudar o si quieres una comprobación extra).
-- `skip`: no lo verifica.
+Antes de renombrar el `.pkg.part` se comprueba que su tamaño coincide exactamente con `originalFileSize`. Si no coincide, se conserva el `.part` y se devuelve error.
+
+### Relectura final (`--verify-final`)
+
+Después de escribir, relee el archivo final y verifica el SHA-256 de cada pieza **en su offset**. También calcula y muestra el SHA-256 del archivo unido completo. Es más lento (una lectura extra de todo el PKG), pero detecta cualquier corrupción posterior a la escritura.
+
+### `packageDigest` (`--strict-package-digest`)
+
+Por defecto no se compara con el archivo unido, porque en los PKG divididos de PS5 no es comparable (ver arriba). Con `--strict-package-digest` se calcula el SHA-256 completo (implica `--verify-final`) y se compara; si difiere, el merge falla con código 4 y conserva el `.part`.
 
 ### Modos de verificación
 
@@ -250,13 +281,11 @@ Contiene:
 Al volver a ejecutar el mismo comando:
 
 - Se verifica que el journal corresponde al mismo manifiesto.
-- Se re-verifica la última pieza completada desde el `.part` (si es la única, además se reconstruye el estado del SHA-256 global).
+- Se re-verifica la última pieza completada desde el `.part`.
+- Se comprueba que el `.part` tiene al menos los bytes que dice el journal.
 - Se continúa desde la siguiente pieza.
 
-Sobre el digest global al reanudar:
-
-- Si se reanudó a mitad y no se pudo reconstruir el estado del SHA-256, `auto` avisa. Usa `--final-digest rehash` si quieres verificar el global leyendo el archivo completo una vez.
-- Si el merge ya estaba completo y el digest había fallado, `auto` vuelve a leer y verificar; no se salta el error.
+Al terminar se comprueba el tamaño total. Si quieres una comprobación completa del archivo, añade `--verify-final`; si quieres comparar el `packageDigest` de Sony, añade `--strict-package-digest`.
 
 Para empezar de cero: `--force`.
 
@@ -298,7 +327,7 @@ Esto es importante porque en un mismo manifiesto la pieza 0 puede llamarse `JP00
 | `1` | Error de uso o cancelado por el usuario. |
 | `2` | Manifiesto inválido, no encontrado o error al descargarlo. |
 | `3` | Piezas faltantes, corruptas o con tamaño incorrecto. |
-| `4` | El `packageDigest` global no coincide. |
+| `4` | El `packageDigest` no coincide y se usó `--strict-package-digest`. |
 | `5` | Error de entrada/salida o espacio insuficiente. |
 | `130` | Interrumpido con Ctrl+C o detenido; se puede reanudar. |
 
@@ -323,18 +352,19 @@ La descarga usa el almacén de certificados de Windows (Schannel). Si estás det
 
 ### El `packageDigest` no coincide, pero todas las piezas están bien
 
-Cada pieza se verifica con su SHA-256, así que el contenido es correcto. Prueba:
+Es lo normal en los PKG divididos de PS5: el `packageDigest` de Sony no es el SHA-256 del archivo concatenado. Las piezas y el tamaño total sí se verifican. Si quieres comprobarlo explícitamente:
 
 ```bat
-pkg-merge ... --final-digest rehash
-pkg-merge ... --allow-digest-mismatch
+pkg-merge ... --verify-final
+pkg-merge ... --strict-package-digest
 ```
 
-Si el manifiesto usa una convención distinta para el digest global, el archivo sigue siendo válido. `--allow-digest-mismatch` solo debe usarse entendiendo esto.
+- `--verify-final` relee el archivo final y valida cada bloque; avisa si el `packageDigest` difiere.
+- `--strict-package-digest` convierte esa diferencia en un error (código 4). No lo uses con PKG divididos normales salvo que sepas que tu manifiesto es comparable.
 
 ### Se cortó el proceso o apagué el PC
 
-Vuelve a ejecutar el mismo comando. El journal y el `.pkg.part` permiten continuar. Si quieres verificar el hash global, añade `--final-digest rehash`.
+Vuelve a ejecutar el mismo comando. El journal y el `.pkg.part` permiten continuar. Si quieres una verificación completa al terminar, añade `--verify-final`.
 
 ### ¿Puedo borrar las piezas al terminar?
 
@@ -418,7 +448,7 @@ src/
   error.rs       errores y códigos de salida
   util.rs        rutas, tamaños, nombres, espacio libre
 tests/
-  integration.rs 22 pruebas con fixtures sintéticos
+  integration.rs 25 pruebas con fixtures sintéticos
 .devcontainer/   imagen de desarrollo
 .github/workflows/build.yml  CI + Releases
 Makefile
@@ -428,14 +458,14 @@ Makefile
 
 Las pruebas cubren:
 
-- Merge normal y digest global.
+- Merge normal con SHA-256 por pieza y tamaño total.
 - Pieza corrupta y pieza faltante.
 - `--check` en serie y en paralelo.
 - In-place con borrado progresivo y protección de la pieza 0.
-- Reanudación tras `--stop-after` y rehash del digest.
+- Reanudación tras `--stop-after` y detección de un `.part` truncado.
 - Mapeo por tamaño y por hash cuando las piezas están renombradas.
 - Manifiesto con huecos.
-- `packageDigest` incorrecto y `--allow-digest-mismatch`.
+- `packageDigest`: no se compara por defecto, `--verify-final` avisa, `--strict-package-digest` falla.
 - `--parts-dir`, autodetección de carpeta y nombre de salida.
 - PKG de una sola pieza.
 - Descarga de una pieza faltante vía HTTP local.
@@ -466,16 +496,18 @@ git push origin v0.2.0
 3. Save that `.json` in the folder with all the `.pkg` pieces.
 4. Drag the folder onto `pkg-merge.exe`.
 
-It verifies the SHA-256 of every piece and the global `packageDigest`, and only creates the final `<name>.pkg` if everything matches.
+It verifies the SHA-256 of every piece and the total size, and only creates the final `<name>.pkg` if everything matches. Optionally, `--verify-final` re-reads the merged file and verifies every block.
+
+> In split PS5 PKGs, Sony's `packageDigest` is **not** the SHA-256 of the concatenated file (main pieces use FIH containers and `_sc.pkg` goes last). Do not use `--strict-package-digest` unless you know your manifest is comparable; per-piece hashes and total size are the authoritative checks.
 
 ```bat
 pkg-merge <folder|manifest.json|crc-url> [--output <dir|file.pkg>]
           [--parts-dir <dir>] [--check] [--in-place --delete-parts --yes]
-          [--download-missing] [--verify post|pre|none]
-          [--final-digest auto|rehash|skip] [--buffer 64] [--jobs 4]
-          [--force] [--allow-digest-mismatch] [--no-progress] [--log <file>]
+          [--download-missing] [--verify post|pre|none] [--verify-final]
+          [--strict-package-digest] [--buffer 64] [--jobs 4]
+          [--force] [--no-progress] [--log <file>]
 ```
 
-Exit codes: `0` OK, `1` usage, `2` manifest, `3` pieces/hash, `4` global digest, `5` I/O/space, `130` interrupted.
+Exit codes: `0` OK, `1` usage, `2` manifest, `3` pieces/hash/size, `4` `packageDigest` mismatch with `--strict-package-digest`, `5` I/O/space, `130` interrupted.
 
 > Unofficial tool, not affiliated with Sony. Keep backups. `--delete-parts` is destructive by design.

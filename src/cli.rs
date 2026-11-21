@@ -11,16 +11,6 @@ pub enum VerifyMode {
     None,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum FinalDigest {
-    /// Usa el hash calculado durante la copia; si se reanudó, se omite con aviso.
-    Auto,
-    /// Relee el archivo final completo para verificar el SHA-256 global.
-    Rehash,
-    /// No verifica el SHA-256 global.
-    Skip,
-}
-
 const AFTER_HELP: &str = r#"EJEMPLOS:
   pkg-merge https://.../EP0082-PPSA08668_00-EUROPE0000000000.crc --parts-dir Z:\pieces --output C:\out
   pkg-merge Z:\pieces --output C:\out
@@ -35,7 +25,14 @@ MODO FÁCIL:
 SEGURIDAD:
   El archivo final solo se renombra a .pkg si todas las piezas y el SHA-256
   global son correctos. --delete-parts borra las piezas después de verificarlas
-  y solo funciona junto a --in-place."#;
+  y solo funciona junto a --in-place.
+
+NOTA SOBRE packageDigest:
+  En los PKG divididos de PS5, el packageDigest de Sony NO es el SHA-256 del
+  archivo concatenado (las piezas principales usan cabeceras FIH y la _sc.pkg
+  va al final). La verificación fiable es el SHA-256 de cada pieza y el tamaño
+  total. --verify-final relee el archivo y comprueba cada bloque; --strict-package-digest
+  compara además el packageDigest y falla si difiere."#;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -109,13 +106,14 @@ pub struct Cli {
     #[arg(short, long)]
     pub verbose: bool,
 
-    /// Si el packageDigest no coincide, avisa pero deja el archivo final.
+    /// Relee el archivo final y verifica el SHA-256 de cada pieza en su offset.
     #[arg(long)]
-    pub allow_digest_mismatch: bool,
+    pub verify_final: bool,
 
-    /// Cómo verificar el SHA-256 global.
-    #[arg(long, value_enum, default_value_t = FinalDigest::Auto)]
-    pub final_digest: FinalDigest,
+    /// Falla (código 4) si el packageDigest de Sony no coincide con el SHA-256 del archivo unido.
+    /// Implica --verify-final.
+    #[arg(long)]
+    pub strict_package_digest: bool,
 
     /// Descarga las piezas que falten directamente al archivo final.
     #[arg(long)]
