@@ -310,6 +310,10 @@ Esto es importante porque en un mismo manifiesto la pieza 0 puede llamarse `JP00
 
 El `.exe` no está firmado. Es normal. Puedes compilarlo tú mismo o revisar el workflow de GitHub Actions. Si SmartScreen lo bloquea, usa "Más información" → "Ejecutar de todas formas" solo si confías en el binario.
 
+### Error de certificado o de red al descargar el manifiesto
+
+La descarga usa el almacén de certificados de Windows (Schannel). Si estás detrás de un proxy corporativo que intercepta HTTPS con su propio certificado, puede rechazarlo. Prueba desde otra red, instala el certificado del proxy en Windows o descarga el `.json` con el navegador y pásalo como archivo local (el programa no necesita Internet si ya tienes el manifiesto y las piezas).
+
 ### Dice que faltan piezas
 
 - Comprueba que `--parts-dir` apunta a la carpeta correcta.
