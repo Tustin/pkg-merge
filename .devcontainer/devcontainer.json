@@ -1,0 +1,21 @@
+{
+  "name": "pkg-merge (Rust)",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "mounts": [
+    "source=pkg-merge-cargo,target=/usr/local/cargo/registry,type=volume",
+    "source=pkg-merge-target,target=/target,type=volume"
+  ],
+  "containerEnv": {
+    "CARGO_TARGET_DIR": "/target"
+  },
+  "postCreateCommand": "rustc --version && cargo --version && cargo fmt --version && cargo clippy --version",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer"
+      ]
+    }
+  }
+}
